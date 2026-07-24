@@ -81,13 +81,17 @@ class IngestWithoutSttTest(unittest.TestCase):
                 "labels": ["person", "kitchen"],
             }],
         }
-        fake_provider = mock.Mock(name="fake-provider")
+
+        class FakeProvider:
+            name = "fake"
+            model = "fake-vision-1"
+
         with (
             mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake"}, clear=False),
             mock.patch.object(ingest, "probe_video", return_value=self.probe),
             mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
             mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
-            mock.patch.object(vlm, "create_provider_from_env", return_value=fake_provider),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=FakeProvider()),
             mock.patch.object(vlm, "analyze_video", return_value=scene_result),
         ):
             result = ingest.process_video(
@@ -151,6 +155,87 @@ class IngestWithoutSttTest(unittest.TestCase):
         scenes = json.loads(scene_path.read_text(encoding="utf-8"))
         self.assertEqual(scenes["model"], "vision-v2")
         self.assertEqual(scenes["summary"], "Second analysis.")
+
+    def test_sampling_config_change_invalidates_scene_artifact(self) -> None:
+        class Provider:
+            name = "fake"
+            model = "vision-v1"
+
+        result = {
+            "version": 1,
+            "provider": "fake",
+            "model": "vision-v1",
+            "summary": "Analysis.",
+            "scenes": [{"timestamp_seconds": 1, "description": "Analysis.", "labels": []}],
+        }
+
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake", "VLM_FRAME_INTERVAL": "60"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=Provider()),
+            mock.patch.object(vlm, "analyze_video", return_value=result),
+        ):
+            ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+        # Change only the sampling interval, keep same provider/model.
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake", "VLM_FRAME_INTERVAL": "30"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=Provider()),
+            mock.patch.object(vlm, "analyze_video", return_value=result) as analyze,
+        ):
+            ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+        analyze.assert_called_once()
+
+    def test_failed_reanalysis_after_config_change_removes_stale_scenes(self) -> None:
+        class ProviderV1:
+            name = "fake"
+            model = "vision-v1"
+
+        class ProviderV2:
+            name = "fake"
+            model = "vision-v2"
+
+        first = {
+            "version": 1,
+            "provider": "fake",
+            "model": "vision-v1",
+            "summary": "Old analysis.",
+            "scenes": [{"timestamp_seconds": 1, "description": "Old analysis.", "labels": []}],
+        }
+
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=ProviderV1()),
+            mock.patch.object(vlm, "analyze_video", return_value=first),
+        ):
+            ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+        scene_path = self.root / "scenes" / "2026" / "0724" / "silent.mp4.json"
+        self.assertTrue(scene_path.is_file())
+
+        # Config change + analysis failure should remove stale scenes.
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=ProviderV2()),
+            mock.patch.object(vlm, "analyze_video", side_effect=RuntimeError("VLM down")),
+        ):
+            result = ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+        self.assertFalse(scene_path.is_file())
+        self.assertEqual(result["scene_count"], 0)
+        self.assertIn("VLM down", result["scene_error"])
 
 
 if __name__ == "__main__":

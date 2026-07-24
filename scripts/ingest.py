@@ -457,9 +457,15 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
     stt_enabled = os.environ.get("STT_PROVIDER", "whisper").lower() != "none"
     vlm_provider = vlm_support.create_provider_from_env()
     vlm_enabled = vlm_provider is not None
-    scene_config_matches = True if vlm_provider is None else (
-        old_scenes.get("provider") == vlm_provider.name
-        and old_scenes.get("model") == vlm_provider.model
+    vlm_interval = float(os.environ.get("VLM_FRAME_INTERVAL", "60"))
+    vlm_max_frames = int(os.environ.get("VLM_MAX_FRAMES", "12"))
+    vlm_base_url = os.environ.get("VLM_BASE_URL", "").strip()
+    scene_config_signature = "" if vlm_provider is None else "|".join([
+        vlm_provider.name, vlm_provider.model, vlm_base_url,
+        str(vlm_interval), str(vlm_max_frames),
+    ])
+    scene_config_matches = vlm_provider is None or (
+        old_scenes.get("config_signature") == scene_config_signature
     )
     already_processed = (
         not force
@@ -543,13 +549,14 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
                     duration_seconds=float(probe["duration_seconds"]),
                     workdir=workdir,
                     provider=vlm_provider,
-                    interval_seconds=float(os.environ.get("VLM_FRAME_INTERVAL", "60")),
-                    max_frames=int(os.environ.get("VLM_MAX_FRAMES", "12")),
+                    interval_seconds=vlm_interval,
+                    max_frames=vlm_max_frames,
                 )
                 scenes = {
                     "id": entry_id(root, video),
                     "source_path": source_path(root, video),
                     "created_at": dt.datetime.now(dt.UTC).isoformat(),
+                    "config_signature": scene_config_signature,
                     **analysis,
                 }
                 atomic_write_json(artifacts["scenes"], scenes)
@@ -557,6 +564,10 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
             except Exception as error:  # noqa: BLE001 - isolate one artifact/video failure from the batch.
                 derivative_errors["scenes"] = str(error)[:500]
                 log("scene_analysis_failed", file=source_path(root, video), error=type(error).__name__)
+                # Remove stale scenes so they are not served as current after a config change.
+                if not scene_config_matches and artifacts["scenes"].is_file():
+                    artifacts["scenes"].unlink(missing_ok=True)
+                    scenes = {}
 
         metadata.update({
             "status": "completed",
@@ -564,6 +575,7 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
             "transcript_chars": len(str(transcript.get("text") or "")),
             "scene_count": len(scenes.get("scenes") or []),
             "scene_summary": str(scenes.get("summary") or ""),
+            "scene_error": derivative_errors.get("scenes", ""),
             "derivative_errors": derivative_errors,
             "error": "",
         })
