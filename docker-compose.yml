@@ -1,18 +1,39 @@
 services:
   afterimage:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_LOCAL_WHISPER: ${INSTALL_LOCAL_WHISPER:-1}
+    init: true
     ports:
-      - "${PORT:-8901}:8901"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8901}:8901"
     environment:
-      - AFTERIMAGE_ROOT=/data
-      - AFTERIMAGE_MODE=${AFTERIMAGE_MODE:-lifelog}
-      - AFTERIMAGE_ORIGIN=${AFTERIMAGE_ORIGIN:-http://localhost:8901}
-      - AFTERIMAGE_ASSET_ORIGIN=${AFTERIMAGE_ASSET_ORIGIN:-}
-      - STT_PROVIDER=${STT_PROVIDER:-whisper}
-      - WHISPER_MODEL=${WHISPER_MODEL:-base}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - STT_CONTEXT=${STT_CONTEXT:-}
-      - GENERATE_PREVIEW=${GENERATE_PREVIEW:-true}
+      AFTERIMAGE_ROOT: /data
+      AFTERIMAGE_MODE: ${AFTERIMAGE_MODE:-lifelog}
+      AFTERIMAGE_ORIGIN: ${AFTERIMAGE_ORIGIN:-http://localhost:8901}
+      AFTERIMAGE_ASSET_ORIGIN: ${AFTERIMAGE_ASSET_ORIGIN:-}
+      AFTERIMAGE_AUTH_TOKEN: ${AFTERIMAGE_AUTH_TOKEN:-}
+      AFTERIMAGE_AUTH_USER: ${AFTERIMAGE_AUTH_USER:-}
+      AFTERIMAGE_AUTH_PASSWORD: ${AFTERIMAGE_AUTH_PASSWORD:-}
+      HOST: 0.0.0.0
+      PORT: 8901
+      STT_PROVIDER: ${STT_PROVIDER:-whisper}
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      STT_CONTEXT: ${STT_CONTEXT:-}
+      VLM_PROVIDER: ${VLM_PROVIDER:-none}
+      VLM_MODEL: ${VLM_MODEL:-}
+      VLM_API_KEY: ${VLM_API_KEY:-}
+      VLM_BASE_URL: ${VLM_BASE_URL:-}
+      VLM_FRAME_INTERVAL: ${VLM_FRAME_INTERVAL:-60}
+      VLM_MAX_FRAMES: ${VLM_MAX_FRAMES:-12}
+      VLM_TIMEOUT: ${VLM_TIMEOUT:-120}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GENERATE_PREVIEW: ${GENERATE_PREVIEW:-true}
+      STABLE_SECONDS: ${STABLE_SECONDS:-10}
+      AFTERIMAGE_CACHE: /tmp/afterimage-cache
     volumes:
       - ${AFTERIMAGE_ROOT:-./data}:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped

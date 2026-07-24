@@ -1,0 +1,157 @@
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from scripts import ingest, vlm
+
+
+class StabilityFilterTest(unittest.TestCase):
+    def test_zero_stability_processes_on_first_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+            stable, state = ingest.select_stable_videos(
+                root,
+                [video],
+                {},
+                now=100,
+                stable_seconds=0,
+            )
+        self.assertEqual(stable, [video])
+        self.assertIn("clip.mp4", state)
+
+
+class IngestWithoutSttTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name) / "data"
+        self.cache = Path(self.tempdir.name) / "cache"
+        (self.cache / "work").mkdir(parents=True)
+        self.video = self.root / "daily" / "2026" / "0724" / "silent.mp4"
+        self.video.parent.mkdir(parents=True)
+        self.video.write_bytes(b"fake-video")
+        self.probe = {
+            "duration_seconds": 2.0,
+            "creation_time": "2026-07-24T00:00:00+00:00",
+            "width": 640,
+            "height": 360,
+            "video_codec": "h264",
+            "audio_codec": "",
+            "audio_sample_rate": 0,
+            "audio_channels": 0,
+        }
+
+    def _write_thumbnail(self, _video: Path, destination: Path, _workdir: Path, _duration: float) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"jpeg")
+
+    def test_stt_none_does_not_extract_audio(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+        ):
+            result = ingest.process_video(
+                self.root,
+                self.video,
+                self.cache,
+                generate_web_preview=False,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        transcript = ingest.read_json(ingest.artifact_paths(self.root, self.video)["transcript_json"])
+        self.assertEqual(transcript["provider"], "none")
+        self.assertEqual(transcript["text"], "")
+
+    def test_vlm_provider_writes_scene_artifact(self) -> None:
+        scene_result = {
+            "version": 1,
+            "provider": "fake",
+            "model": "fake-vision-1",
+            "summary": "A person walks through a kitchen.",
+            "scenes": [{
+                "timestamp_seconds": 1.0,
+                "description": "A person walks through a kitchen.",
+                "labels": ["person", "kitchen"],
+            }],
+        }
+        fake_provider = mock.Mock(name="fake-provider")
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+            mock.patch.object(vlm, "create_provider_from_env", return_value=fake_provider),
+            mock.patch.object(vlm, "analyze_video", return_value=scene_result),
+        ):
+            result = ingest.process_video(
+                self.root,
+                self.video,
+                self.cache,
+                generate_web_preview=False,
+            )
+
+        scene_path = self.root / "scenes" / "2026" / "0724" / "silent.mp4.json"
+        self.assertTrue(scene_path.is_file())
+        self.assertEqual(ingest.read_json(scene_path)["summary"], scene_result["summary"])
+        self.assertEqual(result["scene_count"], 1)
+        scenes = json.loads(scene_path.read_text(encoding="utf-8"))
+        self.assertEqual(scenes["provider"], "fake")
+
+    def test_vlm_model_change_reanalyzes_existing_scene_artifact(self) -> None:
+        class ProviderV1:
+            name = "fake"
+            model = "vision-v1"
+
+        class ProviderV2:
+            name = "fake"
+            model = "vision-v2"
+
+        first = {
+            "version": 1,
+            "provider": "fake",
+            "model": "vision-v1",
+            "summary": "First analysis.",
+            "scenes": [{"timestamp_seconds": 1, "description": "First analysis.", "labels": []}],
+        }
+        second = {
+            "version": 1,
+            "provider": "fake",
+            "model": "vision-v2",
+            "summary": "Second analysis.",
+            "scenes": [{"timestamp_seconds": 1, "description": "Second analysis.", "labels": []}],
+        }
+
+        with (
+            mock.patch.dict(os.environ, {"STT_PROVIDER": "none", "VLM_PROVIDER": "fake"}, clear=False),
+            mock.patch.object(ingest, "probe_video", return_value=self.probe),
+            mock.patch.object(ingest, "extract_audio", side_effect=AssertionError("audio extraction must be skipped")),
+            mock.patch.object(ingest, "extract_thumbnail", side_effect=self._write_thumbnail),
+        ):
+            with (
+                mock.patch.object(vlm, "create_provider_from_env", return_value=ProviderV1()),
+                mock.patch.object(vlm, "analyze_video", return_value=first),
+            ):
+                ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+            with (
+                mock.patch.object(vlm, "create_provider_from_env", return_value=ProviderV2()),
+                mock.patch.object(vlm, "analyze_video", return_value=second) as analyze,
+            ):
+                ingest.process_video(self.root, self.video, self.cache, generate_web_preview=False)
+
+        analyze.assert_called_once()
+        scene_path = self.root / "scenes" / "2026" / "0724" / "silent.mp4.json"
+        scenes = json.loads(scene_path.read_text(encoding="utf-8"))
+        self.assertEqual(scenes["model"], "vision-v2")
+        self.assertEqual(scenes["summary"], "Second analysis.")
+
+
+if __name__ == "__main__":
+    unittest.main()

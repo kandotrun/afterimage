@@ -32,18 +32,20 @@ function listShape(entries, limit) {
     previewUrl: entry.previewUrl,
     thumbnailUrl: entry.thumbnailUrl,
     hasTranscript: Boolean(entry.transcript?.text),
+    hasSceneAnalysis: Boolean(entry.sceneAnalysis?.summary),
+    sceneSummary: entry.sceneAnalysis?.summary || "",
   }));
 }
 
 export function createAfterimageMcpServer({ root, assetOrigin }) {
   const server = new McpServer(
-    { name: "afterimage", version: "0.1.0" },
-    { instructions: "Read-only access to daily video entries and transcripts. Verify source URLs before saving to memory." },
+    { name: "afterimage", version: "0.2.0" },
+    { instructions: "Read-only access to daily video entries, visual scene context, and transcripts. Verify source URLs before saving to memory." },
   );
 
   server.registerTool("list_daily_entries", {
     title: "List daily entries",
-    description: "List daily videos ordered by capture time, with transcription status and source URLs. Optionally filter by date (YYYY-MM-DD).",
+    description: "List daily videos ordered by capture time, with transcript/scene status and source URLs. Optionally filter by date (YYYY-MM-DD).",
     annotations: READ_ONLY,
     inputSchema: {
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),

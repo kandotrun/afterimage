@@ -106,6 +106,7 @@ export function renderAppPage() {
     .status.processing { color:var(--warning); }
     .status.error { color:var(--danger); }
     .transcript-label { margin:18px 0 6px; color:var(--muted); font-size:12px; font-weight:650; }
+    .scene-summary { margin:0; padding:10px 12px; border-left:3px solid #bfdbfe; border-radius:0 var(--control-radius) var(--control-radius) 0; background:var(--accent-soft); color:#26364d; font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
     .transcript { margin:0; color:#333842; font-size:14px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; }
     .transcript.collapsed { display:-webkit-box; overflow:hidden; -webkit-box-orient:vertical; -webkit-line-clamp:6; }
     .pending-copy { color:var(--muted); }
@@ -278,6 +279,11 @@ export function renderAppPage() {
     }
     function createClipCard(item,index,{ search=false,prefix="clip" }={}) {
       const status = ["completed","processing","pending","error"].includes(item.status) ? item.status : "pending";
+      const sceneSummary = item.sceneSummary || item.sceneAnalysis?.summary || "";
+      const hasTranscriptData = Boolean(item.snippet || item.transcript?.text);
+      const displayStatus = status === "completed"
+        ? (hasTranscriptData ? "Transcribed" : (sceneSummary ? "Analyzed" : "Processed"))
+        : statusLabel(status);
       const card = el("article","clip-card");
       card.setAttribute("aria-label",item.filename || "Video");
 
@@ -303,8 +309,13 @@ export function renderAppPage() {
       const head = el("div","clip-head");
       const heading = el("div","");
       heading.append(el("h3","clip-time",localTime(item.capturedAt)),el("p","filename",item.filename || "Unknown file"));
-      head.append(heading,el("span","status " + status,statusLabel(status)));
+      head.append(heading,el("span","status " + status,displayStatus));
       content.append(head);
+
+      if (sceneSummary) {
+        content.append(el("p","transcript-label","Visual context"));
+        content.append(el("p","scene-summary",sceneSummary));
+      }
 
       const transcriptText = item.snippet || item.transcript?.text || (item.error ? "Processing error: " + item.error : "Transcription in progress.");
       const hasTranscript = Boolean(item.snippet || item.transcript?.text);
@@ -386,12 +397,15 @@ export function renderAppPage() {
 
       function showChapterTranscript(chapter,index) {
         const entry = entryById.get(chapter.id) || items.find((item) => item.filename === chapter.filename);
-        const text = entry?.transcript?.text || (entry?.error ? "Processing error: " + entry.error : "Transcription in progress.");
-        const hasTranscript = Boolean(entry?.transcript?.text);
+        const transcriptText = entry?.transcript?.text || "";
+        const visualText = entry?.sceneAnalysis?.summary || "";
+        const text = transcriptText || visualText || (entry?.error ? "Processing error: " + entry.error : "Analysis in progress.");
+        const hasContext = Boolean(transcriptText || visualText);
+        liveTranscriptLabel.textContent = transcriptText ? "Now playing · transcript" : (visualText ? "Now playing · visual context" : "Now playing");
         liveTranscriptTime.textContent = localTime(chapter.capturedAt);
         liveTranscriptText.textContent = text;
         liveTranscriptText.scrollTop = 0;
-        liveTranscript.classList.toggle("pending",!hasTranscript);
+        liveTranscript.classList.toggle("pending",!hasContext);
         liveTranscript.dataset.chapterIndex = String(index);
       }
       function setActive(activeIndex) {
@@ -473,8 +487,9 @@ export function renderAppPage() {
       clips.setAttribute("aria-busy","false");
       clips.replaceChildren();
       $("#dayTitle").textContent = search ? "Results for \\"" + query + "\\"" : formatDay(dateInput.value);
-      const completed = items.filter((item) => item.transcript?.text || item.snippet).length;
-      $("#counts").textContent = total + " clips (" + completed + " transcribed)";
+      const transcribed = items.filter((item) => item.transcript?.text).length;
+      const analyzed = items.filter((item) => item.sceneAnalysis?.summary || item.sceneSummary).length;
+      $("#counts").textContent = total + " clips (" + analyzed + " analyzed, " + transcribed + " transcribed)";
       if (!items.length) {
         const empty = el("section","empty");
         empty.append(

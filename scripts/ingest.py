@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+try:
+    from scripts import vlm as vlm_support
+except ImportError:  # Running as `python scripts/ingest.py`.
+    import vlm as vlm_support  # type: ignore[no-redef]
+
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 
 
@@ -60,6 +65,7 @@ def artifact_paths(root: Path, video: Path) -> dict[str, Path]:
         "transcript_json": root / "transcripts" / year / day / f"{filename}.json",
         "transcript_text": root / "transcripts" / year / day / f"{filename}.txt",
         "metadata": root / "metadata" / year / day / f"{filename}.json",
+        "scenes": root / "scenes" / year / day / f"{filename}.json",
         "memory": root / "memory" / year / f"{day}.md",
     }
 
@@ -102,11 +108,12 @@ def select_stable_videos(
     for video in videos:
         key = source_path(root, video)
         current = fingerprint(video)
-        previous = state.get(key) if isinstance(state.get(key), dict) else {}
+        candidate = state.get(key)
+        previous: dict[str, Any] = candidate if isinstance(candidate, dict) else {}
         unchanged = previous.get("fingerprint") == current
         first_seen = float(previous.get("first_seen") or now) if unchanged else now
         next_state[key] = {"fingerprint": current, "first_seen": first_seen, "last_seen": now}
-        if unchanged and now - first_seen >= max(0.0, stable_seconds):
+        if stable_seconds <= 0 or (unchanged and now - first_seen >= stable_seconds):
             stable.append(video)
     return stable, next_state
 
@@ -292,7 +299,7 @@ def build_daily_video(root: Path, date: str, cache: Path, force: bool = False) -
 
 def transcribe_whisper(audio: Path) -> tuple[str, dict[str, Any]]:
     """Local Whisper transcription via openai-whisper package."""
-    import whisper
+    import whisper  # pyright: ignore[reportMissingImports]
 
     model_name = os.environ.get("WHISPER_MODEL", "base")
     model = whisper.load_model(model_name)
@@ -309,7 +316,7 @@ def transcribe_whisper(audio: Path) -> tuple[str, dict[str, Any]]:
 
 def transcribe_openai(audio: Path) -> tuple[str, dict[str, Any]]:
     """OpenAI Whisper API transcription."""
-    from openai import OpenAI
+    from openai import OpenAI  # pyright: ignore[reportMissingImports]
 
     client = OpenAI()
     with open(audio, "rb") as f:
@@ -446,39 +453,52 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
     current_fingerprint = fingerprint(video)
     old_metadata = read_json(artifacts["metadata"])
     old_transcript = read_json(artifacts["transcript_json"])
-    already_transcribed = (
+    old_scenes = read_json(artifacts["scenes"])
+    stt_enabled = os.environ.get("STT_PROVIDER", "whisper").lower() != "none"
+    vlm_provider = vlm_support.create_provider_from_env()
+    vlm_enabled = vlm_provider is not None
+    scene_config_matches = True if vlm_provider is None else (
+        old_scenes.get("provider") == vlm_provider.name
+        and old_scenes.get("model") == vlm_provider.model
+    )
+    already_processed = (
         not force
         and old_metadata.get("fingerprint") == current_fingerprint
         and old_metadata.get("status") == "completed"
-        and bool(old_transcript.get("text") or old_transcript.get("raw_text"))
+        and artifacts["transcript_json"].is_file()
+        and (not stt_enabled or bool(old_transcript.get("text") or old_transcript.get("raw_text")))
     )
 
-    required_artifacts = ["audio", "thumbnail", "transcript_json", "transcript_text"]
+    required_artifacts = ["thumbnail", "transcript_json", "transcript_text"]
+    if stt_enabled:
+        required_artifacts.append("audio")
+    if vlm_enabled:
+        required_artifacts.append("scenes")
     if generate_web_preview:
         required_artifacts.append("preview")
-    derivatives_ready = all(
+    derivatives_ready = scene_config_matches and all(
         artifacts[key].is_file() and artifacts[key].stat().st_size > 0
         for key in required_artifacts
     )
-    if already_transcribed and derivatives_ready:
+    if already_processed and derivatives_ready:
         log("video_skipped", file=source_path(root, video), reason="fingerprint_and_artifacts_unchanged")
         return {**old_metadata, "text": str(old_transcript.get("text") or ""), "skipped": True}
 
     probe = probe_video(video)
     metadata = {
         **base_metadata(root, video, probe, artifacts),
-        "status": "completed" if already_transcribed else "processing",
+        "status": "completed" if already_processed else "processing",
         "started_at": dt.datetime.now(dt.UTC).isoformat(),
     }
     atomic_write_json(artifacts["metadata"], metadata)
     workdir = Path(tempfile.mkdtemp(prefix=f"{entry_id(root, video)}-", dir=cache / "work"))
     try:
-        if force or not artifacts["audio"].exists() or artifacts["audio"].stat().st_size <= 0:
+        if stt_enabled and (force or not artifacts["audio"].exists() or artifacts["audio"].stat().st_size <= 0):
             log("audio_extract_started", file=source_path(root, video))
             extract_audio(video, artifacts["audio"], workdir)
             log("audio_extract_completed", file=source_path(root, video), bytes=artifacts["audio"].stat().st_size)
 
-        if already_transcribed:
+        if already_processed:
             transcript = old_transcript
             if not artifacts["transcript_text"].exists() or artifacts["transcript_text"].stat().st_size <= 0:
                 atomic_write_text(artifacts["transcript_text"], str(transcript.get("text") or "") + "\n")
@@ -495,7 +515,7 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
         if force or not artifacts["thumbnail"].exists() or artifacts["thumbnail"].stat().st_size <= 0:
             try:
                 extract_thumbnail(video, artifacts["thumbnail"], workdir, float(probe["duration_seconds"]))
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - isolate one artifact/video failure from the batch.
                 derivative_errors["thumbnail"] = str(error)[:500]
                 log("thumbnail_failed", file=source_path(root, video), error=type(error).__name__)
 
@@ -504,14 +524,46 @@ def process_video(root: Path, video: Path, cache: Path, generate_web_preview: bo
                 log("preview_started", file=source_path(root, video))
                 generate_preview(video, artifacts["preview"], workdir)
                 log("preview_completed", file=source_path(root, video), bytes=artifacts["preview"].stat().st_size)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - isolate one artifact/video failure from the batch.
                 derivative_errors["preview"] = str(error)[:500]
                 log("preview_failed", file=source_path(root, video), error=type(error).__name__)
+
+        scenes = old_scenes
+        if vlm_enabled and (
+            force
+            or not already_processed
+            or not scene_config_matches
+            or not artifacts["scenes"].is_file()
+            or artifacts["scenes"].stat().st_size <= 0
+        ):
+            try:
+                log("scene_analysis_started", file=source_path(root, video))
+                analysis = vlm_support.analyze_video(
+                    video,
+                    duration_seconds=float(probe["duration_seconds"]),
+                    workdir=workdir,
+                    provider=vlm_provider,
+                    interval_seconds=float(os.environ.get("VLM_FRAME_INTERVAL", "60")),
+                    max_frames=int(os.environ.get("VLM_MAX_FRAMES", "12")),
+                )
+                scenes = {
+                    "id": entry_id(root, video),
+                    "source_path": source_path(root, video),
+                    "created_at": dt.datetime.now(dt.UTC).isoformat(),
+                    **analysis,
+                }
+                atomic_write_json(artifacts["scenes"], scenes)
+                log("scene_analysis_completed", file=source_path(root, video), scenes=len(scenes.get("scenes") or []))
+            except Exception as error:  # noqa: BLE001 - isolate one artifact/video failure from the batch.
+                derivative_errors["scenes"] = str(error)[:500]
+                log("scene_analysis_failed", file=source_path(root, video), error=type(error).__name__)
 
         metadata.update({
             "status": "completed",
             "completed_at": dt.datetime.now(dt.UTC).isoformat(),
             "transcript_chars": len(str(transcript.get("text") or "")),
+            "scene_count": len(scenes.get("scenes") or []),
+            "scene_summary": str(scenes.get("summary") or ""),
             "derivative_errors": derivative_errors,
             "error": "",
         })
@@ -591,7 +643,7 @@ def main() -> int:
                 result = process_video(root, video, cache, generate_web_preview, force=args.force)
                 if not result.get("skipped"):
                     touched_dates.add(date)
-            except Exception:
+            except Exception:  # noqa: BLE001 - continue processing remaining videos.
                 failures += 1
                 touched_dates.add(date)
         for date in sorted(touched_dates):
@@ -600,7 +652,7 @@ def main() -> int:
             for date in sorted(compilation_dates):
                 try:
                     build_daily_video(root, date, cache, force=args.force)
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 - isolate one artifact/video failure from the batch.
                     failures += 1
                     log("daily_video_failed", date=date, error=type(error).__name__)
         log("ingest_completed", count=len(videos), failures=failures)

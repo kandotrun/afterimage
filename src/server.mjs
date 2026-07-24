@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import http from "node:http";
@@ -58,6 +59,50 @@ class HttpError extends Error {
   }
 }
 
+function secureEqual(left, right) {
+  const leftDigest = createHash("sha256").update(String(left)).digest();
+  const rightDigest = createHash("sha256").update(String(right)).digest();
+  return timingSafeEqual(leftDigest, rightDigest);
+}
+
+function normalizeAuth(auth = {}) {
+  const token = String(auth.token || "").trim();
+  const username = String(auth.username || "");
+  const password = String(auth.password || "");
+  if (Boolean(username) !== Boolean(password)) {
+    throw new Error("auth username and password must be configured together");
+  }
+  return { token, username, password, enabled: Boolean(token || username) };
+}
+
+function isAuthorized(request, auth) {
+  if (!auth.enabled) return true;
+  const authorization = String(request.headers.authorization || "");
+  const separator = authorization.indexOf(" ");
+  if (separator < 1) return false;
+  const scheme = authorization.slice(0, separator).toLowerCase();
+  const credential = authorization.slice(separator + 1).trim();
+
+  if (scheme === "bearer" && auth.token) {
+    return secureEqual(credential, auth.token);
+  }
+  if (scheme === "basic" && auth.username) {
+    const decoded = Buffer.from(credential, "base64").toString("utf8");
+    const colon = decoded.indexOf(":");
+    if (colon < 0) return false;
+    return secureEqual(decoded.slice(0, colon), auth.username)
+      && secureEqual(decoded.slice(colon + 1), auth.password);
+  }
+  return false;
+}
+
+function authChallenges(auth) {
+  const challenges = [];
+  if (auth.username) challenges.push('Basic realm="afterimage", charset="UTF-8"');
+  if (auth.token) challenges.push('Bearer realm="afterimage"');
+  return challenges;
+}
+
 function baseHeaders(privateResource = false) {
   const headers = {
     "cross-origin-resource-policy": privateResource ? "same-origin" : "cross-origin",
@@ -80,6 +125,14 @@ function sendBuffer(response, status, body, headers = {}, method = "GET", privat
     ...headers,
   });
   response.end(method === "HEAD" ? undefined : bytes);
+}
+
+function sendUnauthorized(response, method, auth) {
+  sendBuffer(response, 401, "authentication_required\n", {
+    "cache-control": "no-store",
+    "content-type": "text/plain; charset=utf-8",
+    "www-authenticate": authChallenges(auth),
+  }, method, true);
 }
 
 function sendError(response, status, message, method = "GET") {
@@ -334,6 +387,7 @@ export function createAfterimageServer({
   mode = "lifelog",
   lifelogOrigin = "",
   assetOrigin = "",
+  auth = {},
 }) {
   if (!root) throw new Error("root is required");
   if (mode !== "public" && mode !== "lifelog") throw new Error("mode must be public or lifelog");
@@ -341,6 +395,7 @@ export function createAfterimageServer({
   const resolvedLifelogOrigin = lifelogOrigin || `http://localhost:${process.env.PORT || 8901}`;
   const resolvedAssetOrigin = assetOrigin || resolvedLifelogOrigin;
   const assetCspOrigin = new URL(resolvedAssetOrigin).origin;
+  const resolvedAuth = normalizeAuth(auth);
 
   return http.createServer(async (request, response) => {
     const method = request.method || "GET";
@@ -359,6 +414,10 @@ export function createAfterimageServer({
           "cache-control": "no-store",
           "content-type": "application/json; charset=utf-8",
         }, method);
+      }
+
+      if (method !== "OPTIONS" && !isAuthorized(request, resolvedAuth)) {
+        return sendUnauthorized(response, method, resolvedAuth);
       }
 
       if (!lifelogMode && isLifelogOnlyPath(pathname)) throw new HttpError(404, "not_found");
@@ -391,7 +450,7 @@ export function createAfterimageServer({
           name: "afterimage",
           transport: "streamable-http",
           endpoint,
-          authentication: "none",
+          authentication: resolvedAuth.token ? "bearer" : (resolvedAuth.username ? "basic" : "none"),
           mcpServers: { afterimage: { url: endpoint } },
         }, method);
       }
@@ -487,9 +546,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const mode = process.env.AFTERIMAGE_MODE || "lifelog";
   const lifelogOrigin = process.env.AFTERIMAGE_ORIGIN || "";
   const assetOrigin = process.env.AFTERIMAGE_ASSET_ORIGIN || "";
+  const auth = {
+    token: process.env.AFTERIMAGE_AUTH_TOKEN || "",
+    username: process.env.AFTERIMAGE_AUTH_USER || "",
+    password: process.env.AFTERIMAGE_AUTH_PASSWORD || "",
+  };
   const host = process.env.HOST || "127.0.0.1";
   const port = Number(process.env.PORT || 8901);
-  const server = createAfterimageServer({ root, mode, lifelogOrigin, assetOrigin });
+  const server = createAfterimageServer({ root, mode, lifelogOrigin, assetOrigin, auth });
   server.requestTimeout = 10 * 60 * 1000;
   server.headersTimeout = 60 * 1000;
   server.listen(port, host, () => console.log(`afterimage ${mode} server ready on ${host}:${port}`));

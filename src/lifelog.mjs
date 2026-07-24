@@ -77,6 +77,27 @@ function transcriptPayload(body) {
   };
 }
 
+function sceneAnalysisPayload(body) {
+  if (!body) return null;
+  const scenes = Array.isArray(body.scenes)
+    ? body.scenes.map((scene) => ({
+      timestampSeconds: Math.max(0, Number(scene?.timestamp_seconds || 0)),
+      description: String(scene?.description || "").trim(),
+      labels: Array.isArray(scene?.labels)
+        ? scene.labels.filter((label) => typeof label === "string").map((label) => label.trim()).filter(Boolean)
+        : [],
+    })).filter((scene) => scene.description)
+    : [];
+  const summary = String(body.summary || scenes.map((scene) => scene.description).join(" ")).trim();
+  if (!summary && !scenes.length) return null;
+  return {
+    summary,
+    scenes,
+    provider: String(body.provider || ""),
+    model: String(body.model || ""),
+  };
+}
+
 async function discoverDateDirectories(root, date = "") {
   const dailyRoot = path.join(root, "daily");
   const requested = dateParts(date);
@@ -133,15 +154,18 @@ export async function loadEntries(root, { date = "", assetOrigin = "" } = {}) {
       const sourcePath = path.posix.join("daily", day.year, day.dayDirectory, file.name);
       const metadataFile = path.join(root, "metadata", day.year, day.dayDirectory, `${file.name}.json`);
       const transcriptFile = path.join(root, "transcripts", day.year, day.dayDirectory, `${file.name}.json`);
+      const sceneFile = path.join(root, "scenes", day.year, day.dayDirectory, `${file.name}.json`);
       const previewFile = path.join(root, "web", day.year, day.dayDirectory, `${file.name}.mp4`);
       const thumbnailFile = path.join(root, "thumbnails", day.year, day.dayDirectory, `${file.name}.jpg`);
-      const [metadata, transcriptBody, hasPreview, hasThumbnail] = await Promise.all([
+      const [metadata, transcriptBody, sceneBody, hasPreview, hasThumbnail] = await Promise.all([
         readJsonOptional(metadataFile),
         readJsonOptional(transcriptFile),
+        readJsonOptional(sceneFile),
         exists(previewFile),
         exists(thumbnailFile),
       ]);
       const transcript = transcriptPayload(transcriptBody);
+      const sceneAnalysis = sceneAnalysisPayload(sceneBody);
       const capturedAt = String(metadata?.captured_at || metadata?.creation_time || sourceInfo.mtime.toISOString());
       const status = String(metadata?.status || (transcript ? "completed" : "pending"));
 
@@ -161,8 +185,9 @@ export async function loadEntries(root, { date = "", assetOrigin = "" } = {}) {
         height: Number(metadata?.height || 0) || null,
         privacyLevel: String(metadata?.privacy_level || "public"),
         status,
-        error: status === "error" ? String(metadata?.error || metadata?.error_message || "transcription_failed") : null,
+        error: status === "error" ? String(metadata?.error || metadata?.error_message || "processing_failed") : null,
         transcript,
+        sceneAnalysis,
       });
     }
   }
@@ -266,8 +291,13 @@ export function searchEntries(entries, query, { date = "", limit = 20 } = {}) {
   for (const entry of entries) {
     if (requestedDate && entry.date !== requestedDate) continue;
     const transcript = entry.transcript?.text || "";
-    if (!transcript) continue;
-    const searchable = `${entry.filename}\n${transcript}`.toLowerCase();
+    const sceneText = [
+      entry.sceneAnalysis?.summary || "",
+      ...(entry.sceneAnalysis?.scenes || []).flatMap((scene) => [scene.description, ...(scene.labels || [])]),
+    ].filter(Boolean).join("\n");
+    const contextText = [transcript, sceneText].filter(Boolean).join("\n");
+    if (!contextText) continue;
+    const searchable = `${entry.filename}\n${contextText}`.toLowerCase();
     if (!terms.every((term) => searchable.includes(term))) continue;
     const score = terms.reduce((sum, term) => sum + occurrences(searchable, term), 0);
     matches.push({
@@ -284,8 +314,9 @@ export function searchEntries(entries, query, { date = "", limit = 20 } = {}) {
       videoUrl: entry.videoUrl,
       previewUrl: entry.previewUrl,
       thumbnailUrl: entry.thumbnailUrl,
+      sceneSummary: entry.sceneAnalysis?.summary || "",
       score,
-      snippet: snippetFor(transcript, terms),
+      snippet: snippetFor(contextText, terms),
     });
   }
   matches.sort((left, right) => right.score - left.score || String(right.capturedAt).localeCompare(String(left.capturedAt)));
@@ -318,6 +349,7 @@ export function buildMemoryContext(entries, date, { origin = "" } = {}) {
     lines.push(`- Duration: ${formatDuration(entry.durationSeconds)}`);
     lines.push(`- Source: ${sourceUrl}`);
     lines.push(`- Status: ${entry.status}`);
+    if (entry.sceneAnalysis?.summary) lines.push(`- Visual context: ${entry.sceneAnalysis.summary}`);
     lines.push("");
     lines.push(entry.transcript?.text || "_Transcription pending_", "");
   }
