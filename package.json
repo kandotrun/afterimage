@@ -1,18 +1,26 @@
 {
   "name": "afterimage",
-  "version": "0.1.0",
-  "description": "Self-hosted lifelog: camera footage → AI-queryable context via MCP",
+  "version": "0.2.0",
+  "description": "Your physical world, remembered. Self-hosted lifelog that turns camera footage into AI-queryable context via MCP.",
   "type": "module",
+  "private": true,
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test test/"
+    "ingest": "python3 scripts/ingest.py",
+    "test:node": "node --test test/*.test.mjs",
+    "test:python": "python3 -m unittest discover -s scripts -p 'test_*.py' -v",
+    "test": "npm run test:node && npm run test:python",
+    "check": "npm test && npm audit --audit-level=high && node --check src/server.mjs && node --check src/lifelog.mjs && node --check src/mcp.mjs && node --check src/app-page.mjs && python3 -m compileall -q scripts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.11"
   }
 }
