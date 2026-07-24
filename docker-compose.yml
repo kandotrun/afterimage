@@ -1,0 +1,18 @@
+services:
+  afterimage:
+    build: .
+    ports:
+      - "${PORT:-8901}:8901"
+    environment:
+      - AFTERIMAGE_ROOT=/data
+      - AFTERIMAGE_MODE=${AFTERIMAGE_MODE:-lifelog}
+      - AFTERIMAGE_ORIGIN=${AFTERIMAGE_ORIGIN:-http://localhost:8901}
+      - AFTERIMAGE_ASSET_ORIGIN=${AFTERIMAGE_ASSET_ORIGIN:-}
+      - STT_PROVIDER=${STT_PROVIDER:-whisper}
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - STT_CONTEXT=${STT_CONTEXT:-}
+      - GENERATE_PREVIEW=${GENERATE_PREVIEW:-true}
+    volumes:
+      - ${AFTERIMAGE_ROOT:-./data}:/data
+    restart: unless-stopped

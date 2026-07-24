@@ -1,0 +1,18 @@
+{
+  "name": "afterimage",
+  "version": "0.1.0",
+  "description": "Self-hosted lifelog: camera footage → AI-queryable context via MCP",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
