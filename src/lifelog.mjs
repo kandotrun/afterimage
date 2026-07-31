@@ -452,13 +452,23 @@ function buildTimeline(entries, timeZone, origin) {
       });
     const transcriptSegments = [...(entry.transcript?.segments || [])]
       .sort((left, right) => secondsValue(left.startSeconds) - secondsValue(right.startSeconds))
-      .map((segment) => ({
-        startSeconds: secondsValue(segment.startSeconds),
-        endSeconds: Math.max(secondsValue(segment.startSeconds), secondsValue(segment.endSeconds)),
-        start: formatTimelineOffset(segment.startSeconds),
-        end: formatTimelineOffset(segment.endSeconds),
-        text: segment.text,
-      }));
+      .map((segment) => {
+        const startSeconds = secondsValue(segment.startSeconds);
+        const endSeconds = Math.max(startSeconds, secondsValue(segment.endSeconds));
+        const segmentStartTimestamp = startTimestamp === null ? null : startTimestamp + startSeconds * 1000;
+        const segmentEndTimestamp = startTimestamp === null ? null : startTimestamp + endSeconds * 1000;
+        return {
+          startSeconds,
+          endSeconds,
+          start: formatTimelineOffset(startSeconds),
+          end: formatTimelineOffset(endSeconds),
+          absoluteStartAtUtc: isoTimestamp(segmentStartTimestamp),
+          absoluteStartAtLocal: localDateTime(segmentStartTimestamp, timeZone),
+          absoluteEndAtUtc: isoTimestamp(segmentEndTimestamp),
+          absoluteEndAtLocal: localDateTime(segmentEndTimestamp, timeZone),
+          text: segment.text,
+        };
+      });
     return {
       sequence: index + 1,
       id: entry.id,
@@ -547,7 +557,10 @@ export function buildMemoryContext(entries, date, { origin = "", timeZone = proc
     if (item.transcriptSegments.length) {
       lines.push("- Transcript segments (ordered by clip offset):");
       for (const segment of item.transcriptSegments) {
-        lines.push(`  - +${segment.start}–+${segment.end} — ${segment.text}`);
+        const absolute = segment.absoluteStartAtLocal
+          ? ` (absolute local ${segment.absoluteStartAtLocal}–${segment.absoluteEndAtLocal}; UTC ${segment.absoluteStartAtUtc}–${segment.absoluteEndAtUtc})`
+          : "";
+        lines.push(`  - +${segment.start}–+${segment.end}${absolute} — ${segment.text}`);
       }
     } else {
       lines.push("- Transcript:", `  ${item.transcript || "_Transcription pending_"}`);

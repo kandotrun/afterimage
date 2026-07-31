@@ -594,7 +594,15 @@ def render_daily_memory(date: str, entries: list[dict[str, Any]], public_origin:
             for segment in segments:
                 start = finite_seconds(segment.get("start_seconds"))
                 end_offset = max(start, finite_seconds(segment.get("end_seconds"), start))
-                lines.append(f"  - +{format_memory_offset(start)}–+{format_memory_offset(end_offset)} — {str(segment.get('text') or '').strip()}")
+                absolute_start = captured + dt.timedelta(seconds=start) if captured else None
+                absolute_end = captured + dt.timedelta(seconds=end_offset) if captured else None
+                absolute_suffix = (
+                    f" (absolute local {format_memory_datetime(absolute_start, timezone)}–{format_memory_datetime(absolute_end, timezone)}; "
+                    f"UTC {format_memory_iso(absolute_start)}–{format_memory_iso(absolute_end)})"
+                    if absolute_start and absolute_end
+                    else ""
+                )
+                lines.append(f"  - +{format_memory_offset(start)}–+{format_memory_offset(end_offset)}{absolute_suffix} — {str(segment.get('text') or '').strip()}")
         else:
             lines.extend(["- Transcript:", f"  {entry.get('text') or '_Transcription pending_'!s}"])
         lines.append("")
