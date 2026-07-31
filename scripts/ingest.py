@@ -8,6 +8,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from scripts import vlm as vlm_support
@@ -154,14 +156,13 @@ def probe_video(video: Path) -> dict[str, Any]:
     streams = body.get("streams") or []
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
     audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
-    creation_time = (
-        (format_info.get("tags") or {}).get("creation_time")
-        or (video_stream.get("tags") or {}).get("creation_time")
-        or dt.datetime.fromtimestamp(video.stat().st_mtime, tz=dt.UTC).isoformat()
-    )
+    tagged_creation_time = (format_info.get("tags") or {}).get("creation_time")
+    tagged_creation_time = tagged_creation_time or (video_stream.get("tags") or {}).get("creation_time")
+    creation_time = tagged_creation_time or dt.datetime.fromtimestamp(video.stat().st_mtime, tz=dt.UTC).isoformat()
     return {
         "duration_seconds": float(format_info.get("duration") or 0),
         "creation_time": creation_time,
+        "capture_time_source": "ffprobe_metadata" if tagged_creation_time else "filesystem_mtime_fallback",
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
         "video_codec": str(video_stream.get("codec_name") or ""),
@@ -311,6 +312,7 @@ def transcribe_whisper(audio: Path) -> tuple[str, dict[str, Any]]:
         "provider": "whisper",
         "model": model_name,
         "language": str(result.get("language") or ""),
+        "segments": normalize_transcript_segments(result.get("segments")),
     }
 
 
@@ -332,6 +334,7 @@ def transcribe_openai(audio: Path) -> tuple[str, dict[str, Any]]:
         "provider": "openai",
         "model": "whisper-1",
         "language": str(getattr(result, "language", "") or ""),
+        "segments": normalize_transcript_segments(getattr(result, "segments", None)),
     }
 
 
@@ -355,8 +358,45 @@ def transcribe_audio(audio: Path) -> tuple[str, dict[str, Any]]:
     return provider(audio)
 
 
+def finite_seconds(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, number) if math.isfinite(number) else default
+
+
+def normalize_transcript_segments(raw_segments: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_segments, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for segment in raw_segments:
+        if isinstance(segment, dict):
+            start = segment.get("start_seconds", segment.get("start", 0))
+            end = segment.get("end_seconds", segment.get("end", start))
+            text = segment.get("text", "")
+        else:
+            start = getattr(segment, "start_seconds", getattr(segment, "start", 0))
+            end = getattr(segment, "end_seconds", getattr(segment, "end", start))
+            text = getattr(segment, "text", "")
+        try:
+            start_seconds = finite_seconds(start)
+            end_seconds = max(start_seconds, finite_seconds(end, start_seconds))
+        except (TypeError, ValueError):
+            continue
+        normalized_text = str(text or "").strip()
+        if not normalized_text:
+            continue
+        normalized.append({
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "text": normalized_text,
+        })
+    return sorted(normalized, key=lambda segment: segment["start_seconds"])
+
+
 def transcript_record(root: Path, video: Path, text: str, job: dict[str, Any]) -> dict[str, Any]:
-    return {
+    record: dict[str, Any] = {
         "id": entry_id(root, video),
         "source_path": source_path(root, video),
         "provider": str(job.get("provider") or ""),
@@ -368,6 +408,10 @@ def transcript_record(root: Path, video: Path, text: str, job: dict[str, Any]) -
         "text": text,
         "created_at": dt.datetime.now(dt.UTC).isoformat(),
     }
+    segments = normalize_transcript_segments(job.get("segments"))
+    if segments:
+        record["segments"] = segments
+    return record
 
 
 def relative_or_empty(root: Path, value: Path) -> str:
@@ -388,6 +432,7 @@ def base_metadata(root: Path, video: Path, probe: dict[str, Any], artifacts: dic
         "size_bytes": info.st_size,
         "modified_at": dt.datetime.fromtimestamp(info.st_mtime, tz=dt.UTC).isoformat(),
         "captured_at": probe["creation_time"],
+        "capture_time_source": probe.get("capture_time_source", "unknown"),
         "duration_seconds": probe["duration_seconds"],
         "width": probe["width"],
         "height": probe["height"],
@@ -401,28 +446,152 @@ def base_metadata(root: Path, video: Path, probe: dict[str, Any], artifacts: dic
     }
 
 
+def parse_capture_time(value: Any) -> dt.datetime | None:
+    """Parse capture metadata into UTC without depending on the host timezone."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return parsed.astimezone(dt.UTC)
+
+
+def memory_timezone() -> tuple[str, dt.tzinfo]:
+    requested = os.environ.get("AFTERIMAGE_TIMEZONE", "Asia/Tokyo").strip() or "Asia/Tokyo"
+    try:
+        return requested, ZoneInfo(requested)
+    except ZoneInfoNotFoundError:
+        return "UTC", dt.UTC
+
+
+def format_memory_datetime(value: dt.datetime | None, timezone: dt.tzinfo) -> str:
+    return value.astimezone(timezone).strftime("%Y-%m-%d %H:%M:%S") if value else ""
+
+
+def format_memory_iso(value: dt.datetime | None) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z") if value else ""
+
+
+def format_memory_offset(seconds: float) -> str:
+    value = finite_seconds(seconds)
+    minutes = int(value // 60)
+    remainder = value - minutes * 60
+    if abs(remainder - round(remainder)) < 0.001:
+        return f"{minutes:02d}:{round(remainder):02d}"
+    return f"{minutes:02d}:{remainder:06.3f}"
+
+
+def format_memory_elapsed(seconds: float) -> str:
+    value = round(finite_seconds(seconds))
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds_remainder = divmod(remainder, 60)
+    prefix = f"{hours:02d}:" if hours else ""
+    return f"{prefix}{minutes:02d}:{seconds_remainder:02d}"
+
+
+def capture_time_source_label(value: Any) -> str:
+    source = str(value or "unknown")
+    labels = {
+        "ffprobe_metadata": "ffprobe creation metadata",
+        "filesystem_mtime_fallback": "filesystem mtime fallback (approximate)",
+        "metadata": "metadata",
+        "metadata_legacy": "legacy metadata (precision unknown)",
+    }
+    return labels.get(source, source)
+
+
+def sorted_memory_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(entry: dict[str, Any]) -> tuple[int, dt.datetime, str]:
+        captured = parse_capture_time(entry.get("captured_at"))
+        return (0 if captured else 1, captured or dt.datetime.max.replace(tzinfo=dt.UTC), str(entry.get("filename") or "").casefold())
+
+    return sorted(entries, key=sort_key)
+
+
 def render_daily_memory(date: str, entries: list[dict[str, Any]], public_origin: str) -> str:
+    timezone_name, timezone = memory_timezone()
+    ordered_entries = sorted_memory_entries(entries)
     lines = [
         f"# {date} Lifelog",
         "",
-        f"- Clips: {len(entries)}",
-        f"- Transcribed: {sum(1 for entry in entries if entry.get('text'))}",
+        f"- Clips: {len(ordered_entries)}",
+        f"- Transcribed: {sum(1 for entry in ordered_entries if entry.get('text'))}",
+        f"- Visually analyzed: {sum(1 for entry in ordered_entries if entry.get('scene_summary') or entry.get('scenes'))}",
+        f"- Local display timezone: {timezone_name}",
+        "",
+        "## Chronological timeline",
+        "",
+        "Read this section as an evidence timeline. Clips are ordered by capture start (the actual instant), not by filename or ingest time.",
+        "- The date in this heading is the source directory date. Use the explicit timestamps below as the authority if a clip crosses a local midnight.",
+        "- Capture end is estimated as capture start plus clip duration; it is not a separately observed event.",
+        "- A gap means no video was captured. Do not invent activities inside a gap.",
+        "- Visual observations are sampled frames. Their `+MM:SS` offsets are relative to the clip start and are listed in video order.",
+        "- Keep observed facts separate from inferences; a clip does not prove what happened between its sampled frames.",
         "",
     ]
-    for entry in sorted(entries, key=lambda item: (str(item.get("captured_at") or ""), str(item.get("filename") or ""))):
+    previous_end: dt.datetime | None = None
+    for index, entry in enumerate(ordered_entries, start=1):
+        captured = parse_capture_time(entry.get("captured_at"))
+        duration_seconds = finite_seconds(entry.get("duration_seconds"))
+        end = captured + dt.timedelta(seconds=duration_seconds) if captured else None
         source = str(entry.get("source_path") or "")
-        url = f"{public_origin.rstrip('/')}/" + "/".join(quote(part) for part in source.split("/"))
-        duration = max(0, round(float(entry.get("duration_seconds") or 0)))
+        url = f"{public_origin.rstrip('/')}" + "/" + "/".join(quote(part) for part in source.split("/"))
+        start_local = format_memory_datetime(captured, timezone)
+        end_local = format_memory_datetime(end, timezone)
+        start_label = start_local or str(entry.get("captured_at") or entry.get("filename") or "unknown start")
+        end_label = end_local or "unknown end"
         lines.extend([
-            f"## {entry.get('captured_at') or entry.get('filename')} — {entry.get('filename')}",
+            f"### {index:02d} · {start_label} → {end_label} — {entry.get('filename')}",
             "",
-            f"- Duration: {duration // 60}:{duration % 60:02d}",
+            f"- Capture start: {start_local or 'unavailable'}{f' (UTC {format_memory_iso(captured)})' if captured else ''}",
+            f"- Capture end (estimated): {end_local or 'unavailable'}{f' (UTC {format_memory_iso(end)})' if end else ''}",
+            f"- Capture time source: {capture_time_source_label(entry.get('capture_time_source'))}",
+            f"- Duration: {format_memory_offset(duration_seconds)}",
+        ])
+        if index == 1:
+            lines.append("- Gap after previous clip: n/a (first clip in timeline)")
+        elif captured is None or previous_end is None:
+            lines.append("- Gap after previous clip: unavailable (capture time metadata is missing)")
+        else:
+            gap_seconds = (captured - previous_end).total_seconds()
+            if gap_seconds >= 0:
+                lines.append(f"- Gap after previous clip: {format_memory_elapsed(gap_seconds)}")
+            else:
+                lines.append(f"- Overlap with previous clip: {format_memory_elapsed(abs(gap_seconds))}")
+        lines.extend([
             f"- Source: {url}",
             f"- Status: {entry.get('status') or 'unknown'}",
-            "",
-            str(entry.get("text") or "_Transcription pending_"),
-            "",
         ])
+        if entry.get("scene_summary"):
+            lines.append(f"- Visual context: {entry['scene_summary']}")
+        scenes = sorted(entry.get("scenes") or [], key=lambda scene: finite_seconds(scene.get("timestamp_seconds")))
+        if scenes:
+            lines.append("- Visual observations (ordered by clip offset):")
+            for scene in scenes:
+                offset = finite_seconds(scene.get("timestamp_seconds"))
+                absolute = captured + dt.timedelta(seconds=offset) if captured else None
+                absolute_label = format_memory_datetime(absolute, timezone)
+                absolute_suffix = f" (absolute local {absolute_label}; UTC {format_memory_iso(absolute)})" if absolute else ""
+                labels = [str(label).strip() for label in scene.get("labels") or [] if str(label).strip()]
+                label_suffix = f" [labels: {', '.join(labels)}]" if labels else ""
+                lines.append(f"  - +{format_memory_offset(offset)}{absolute_suffix} — {str(scene.get('description') or '').strip()}{label_suffix}")
+        segments = sorted(entry.get("transcript_segments") or [], key=lambda segment: finite_seconds(segment.get("start_seconds")))
+        if segments:
+            lines.append("- Transcript segments (ordered by clip offset):")
+            for segment in segments:
+                start = finite_seconds(segment.get("start_seconds"))
+                end_offset = max(start, finite_seconds(segment.get("end_seconds"), start))
+                lines.append(f"  - +{format_memory_offset(start)}–+{format_memory_offset(end_offset)} — {str(segment.get('text') or '').strip()}")
+        else:
+            lines.extend(["- Transcript:", f"  {entry.get('text') or '_Transcription pending_'!s}"])
+        lines.append("")
+        previous_end = end
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -433,11 +602,19 @@ def rebuild_daily_memory(root: Path, date: str, public_origin: str) -> Path:
     entries: list[dict[str, Any]] = []
     metadata_dir = root / "metadata" / year / day
     transcript_dir = root / "transcripts" / year / day
+    scenes_dir = root / "scenes" / year / day
     if metadata_dir.exists():
         for metadata_file in sorted(metadata_dir.glob("*.json")):
             metadata = read_json(metadata_file)
             transcript = read_json(transcript_dir / metadata_file.name)
-            entries.append({**metadata, "text": transcript.get("text") or transcript.get("corrected_text") or transcript.get("raw_text") or ""})
+            scenes = read_json(scenes_dir / metadata_file.name)
+            entries.append({
+                **metadata,
+                "text": transcript.get("text") or transcript.get("corrected_text") or transcript.get("raw_text") or "",
+                "transcript_segments": transcript.get("segments") or [],
+                "scene_summary": scenes.get("summary") or metadata.get("scene_summary") or "",
+                "scenes": scenes.get("scenes") or [],
+            })
     destination = root / "memory" / year / f"{day}.md"
     atomic_write_text(destination, render_daily_memory(date, entries, public_origin))
     return destination
@@ -658,7 +835,7 @@ def main() -> int:
             except Exception:  # noqa: BLE001 - continue processing remaining videos.
                 failures += 1
                 touched_dates.add(date)
-        for date in sorted(touched_dates):
+        for date in sorted(compilation_dates | touched_dates):
             rebuild_daily_memory(root, date, public_origin)
         if generate_web_preview:
             for date in sorted(compilation_dates):

@@ -51,6 +51,15 @@ test("authenticated MCP client lists visual context", async () => {
     });
     assert.equal(result.structuredContent.items[0].hasSceneAnalysis, true);
     assert.equal(result.structuredContent.items[0].sceneSummary, "A dog is sleeping beside a sofa.");
+
+    const context = await client.callTool({
+      name: "get_daily_memory_context",
+      arguments: { date: "2026-07-24" },
+    });
+    assert.equal(context.structuredContent.timezone, "Asia/Tokyo");
+    assert.equal(context.structuredContent.timeline[0].startAtLocal, "2026-07-24 19:00:00");
+    assert.equal(context.structuredContent.timeline[0].scenes[0].offset, "00:01");
+    assert.match(context.structuredContent.markdown, /Chronological timeline/);
   } finally {
     await client.close().catch(() => {});
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

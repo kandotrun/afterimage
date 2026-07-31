@@ -24,6 +24,7 @@ function listShape(entries, limit) {
     date: entry.date,
     filename: entry.filename,
     capturedAt: entry.capturedAt,
+    captureTimeSource: entry.captureTimeSource,
     durationSeconds: entry.durationSeconds,
     sizeBytes: entry.sizeBytes,
     status: entry.status,
@@ -37,15 +38,15 @@ function listShape(entries, limit) {
   }));
 }
 
-export function createAfterimageMcpServer({ root, assetOrigin }) {
+export function createAfterimageMcpServer({ root, assetOrigin, timeZone }) {
   const server = new McpServer(
     { name: "afterimage", version: "0.2.0" },
-    { instructions: "Read-only access to daily video entries, visual scene context, and transcripts. Verify source URLs before saving to memory." },
+    { instructions: "Read-only access to daily video entries, visual scene context, and transcripts. Daily memory context is an evidence timeline ordered by capture start; it includes estimated clip ends, gaps, clip-relative scene/transcript offsets, local timezone, and UTC timestamps. Verify source URLs before saving to memory." },
   );
 
   server.registerTool("list_daily_entries", {
     title: "List daily entries",
-    description: "List daily videos ordered by capture time, with transcript/scene status and source URLs. Optionally filter by date (YYYY-MM-DD).",
+    description: "List daily videos ordered by capture time, with capture-time provenance, transcript/scene status, and source URLs. Optionally filter by date (YYYY-MM-DD).",
     annotations: READ_ONLY,
     inputSchema: {
       date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -86,12 +87,12 @@ export function createAfterimageMcpServer({ root, assetOrigin }) {
 
   server.registerTool("get_daily_memory_context", {
     title: "Daily memory context",
-    description: "Get all videos for a date as a Markdown summary with source URLs. Suitable for AI agent memory ingestion.",
+    description: "Get all videos for a date as a chronological evidence timeline with capture start/end, gaps, timestamped visual observations/transcript segments, local timezone, UTC timestamps, and source URLs. Treat gaps and estimated ends explicitly; do not invent events between clips. Suitable for AI agent memory ingestion.",
     annotations: READ_ONLY,
     inputSchema: { date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) },
   }, async ({ date }) => {
     const entries = await loadEntries(root, { date, assetOrigin });
-    return toolResult(buildMemoryContext(entries, date, { origin: assetOrigin }));
+    return toolResult(buildMemoryContext(entries, date, { origin: assetOrigin, timeZone }));
   });
 
   return server;

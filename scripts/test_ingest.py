@@ -237,6 +237,55 @@ class IngestWithoutSttTest(unittest.TestCase):
         self.assertEqual(result["scene_count"], 0)
         self.assertIn("VLM down", result["scene_error"])
 
+    def test_render_daily_memory_includes_chronology_and_scene_offsets(self) -> None:
+        entries = [
+            {
+                "filename": "later-name.mp4",
+                "captured_at": "2026-07-29T01:00:00+09:00",
+                "capture_time_source": "filesystem_mtime_fallback",
+                "duration_seconds": 30,
+                "source_path": "daily/2026/0729/later-name.mp4",
+                "status": "completed",
+                "text": "Went to the pool.",
+                "transcript_segments": [{"start_seconds": 1, "end_seconds": 2.5, "text": "Went to the pool."}],
+                "scenes": [{"timestamp_seconds": 5, "description": "A pool is visible.", "labels": ["pool"]}],
+            },
+            {
+                "filename": "earlier-name.mp4",
+                "captured_at": "2026-07-29T00:30:00Z",
+                "duration_seconds": 45,
+                "source_path": "daily/2026/0729/earlier-name.mp4",
+                "status": "completed",
+                "text": "The dog is resting.",
+                "scenes": [{"timestamp_seconds": 12, "description": "A dog is resting at home.", "labels": ["dog"]}],
+            },
+        ]
+
+        markdown = ingest.render_daily_memory("2026-07-29", entries, "http://localhost:8901")
+
+        self.assertLess(markdown.index("later-name.mp4"), markdown.index("earlier-name.mp4"))
+        self.assertIn("Chronological timeline", markdown)
+        self.assertIn("Capture end (estimated)", markdown)
+        self.assertIn("Capture time source: filesystem mtime fallback (approximate)", markdown)
+        self.assertIn("Gap after previous clip: 08:29:30", markdown)
+        self.assertIn("+00:12", markdown)
+        self.assertIn("A dog is resting at home.", markdown)
+        self.assertIn("+00:01–+00:02.500", markdown)
+
+    def test_transcript_record_preserves_timed_segments(self) -> None:
+        record = ingest.transcript_record(
+            self.root,
+            self.video,
+            "A dog is resting.",
+            {
+                "provider": "fake",
+                "model": "fake-stt-1",
+                "segments": [{"start": 1.25, "end": 3.5, "text": "A dog is resting."}],
+            },
+        )
+
+        self.assertEqual(record["segments"], [{"start_seconds": 1.25, "end_seconds": 3.5, "text": "A dog is resting."}])
+
 
 if __name__ == "__main__":
     unittest.main()
