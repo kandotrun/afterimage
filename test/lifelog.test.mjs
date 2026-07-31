@@ -110,11 +110,16 @@ test("memory context preserves chronological order, clip boundaries, gaps, and s
     assert.equal(memory.timeline[1].scenes[0].offset, "00:12");
     assert.equal(memory.timeline[1].scenes[0].absoluteAtLocal, "2026-07-29 09:30:12");
     assert.equal(memory.timeline[1].transcriptSegments[0].start, "00:03");
+    assert.equal(memory.timeline[1].transcriptSegments[0].absoluteStartAtLocal, "2026-07-29 09:30:03");
+    assert.equal(memory.timeline[1].transcriptSegments[0].absoluteEndAtLocal, "2026-07-29 09:30:04");
+    assert.equal(memory.timeline[1].transcriptSegments[0].absoluteStartAtUtc, "2026-07-29T00:30:03.000Z");
+    assert.equal(memory.timeline[1].transcriptSegments[0].absoluteEndAtUtc, "2026-07-29T00:30:04.500Z");
     assert.equal(memory.timeline[1].gapAfterPreviousEndSeconds, 30570);
     assert.match(memory.markdown, /Chronological timeline/);
     assert.match(memory.markdown, /Capture end \(estimated\)/);
     assert.match(memory.markdown, /Gap after previous clip: 08:29:30/);
     assert.match(memory.markdown, /\+00:12 .*A dog is resting at home\./);
+    assert.match(memory.markdown, /absolute local 2026-07-29 09:30:03–2026-07-29 09:30:04/);
     assert.match(memory.markdown, /\+00:03–\+00:04\.500 .*The dog is resting\./);
     assert.ok(memory.markdown.indexOf("later-name.mp4") < memory.markdown.indexOf("earlier-name.mp4"));
   } finally {

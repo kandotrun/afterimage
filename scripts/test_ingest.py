@@ -271,6 +271,7 @@ class IngestWithoutSttTest(unittest.TestCase):
         self.assertIn("+00:12", markdown)
         self.assertIn("A dog is resting at home.", markdown)
         self.assertIn("+00:01–+00:02.500", markdown)
+        self.assertIn("absolute local 2026-07-29 01:00:01–2026-07-29 01:00:02", markdown)
 
     def test_daily_video_order_uses_capture_instants(self) -> None:
         later_name = self.root / "daily" / "2026" / "0729" / "later-name.mp4"
