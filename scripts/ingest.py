@@ -217,11 +217,7 @@ def generate_preview(video: Path, destination: Path, workdir: Path) -> None:
 
 def build_daily_video(root: Path, date: str, cache: Path, force: bool = False) -> dict[str, Any]:
     """Join a day's browser previews into one seekable MP4 without re-encoding."""
-    videos = discover_videos(root, date)
-    videos.sort(key=lambda video: (
-        str(read_json(artifact_paths(root, video)["metadata"]).get("captured_at") or ""),
-        video.name.casefold(),
-    ))
+    videos = sort_videos_by_capture(root, discover_videos(root, date))
     paths = daily_video_paths(root, date)
     if len(videos) < 2:
         return {"ready": False, "skipped": True, "reason": "single_or_empty_day"}
@@ -506,12 +502,23 @@ def capture_time_source_label(value: Any) -> str:
     return labels.get(source, source)
 
 
-def sorted_memory_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def sort_key(entry: dict[str, Any]) -> tuple[int, dt.datetime, str]:
-        captured = parse_capture_time(entry.get("captured_at"))
-        return (0 if captured else 1, captured or dt.datetime.max.replace(tzinfo=dt.UTC), str(entry.get("filename") or "").casefold())
+def capture_sort_key(captured_at: Any, filename: Any) -> tuple[int, dt.datetime, str]:
+    captured = parse_capture_time(captured_at)
+    return (0 if captured else 1, captured or dt.datetime.max.replace(tzinfo=dt.UTC), str(filename or "").casefold())
 
-    return sorted(entries, key=sort_key)
+
+def sort_videos_by_capture(root: Path, videos: list[Path]) -> list[Path]:
+    return sorted(
+        videos,
+        key=lambda video: capture_sort_key(
+            read_json(artifact_paths(root, video)["metadata"]).get("captured_at"),
+            video.name,
+        ),
+    )
+
+
+def sorted_memory_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(entries, key=lambda entry: capture_sort_key(entry.get("captured_at"), entry.get("filename")))
 
 
 def render_daily_memory(date: str, entries: list[dict[str, Any]], public_origin: str) -> str:
