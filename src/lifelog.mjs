@@ -67,6 +67,17 @@ function transcriptPayload(body) {
   if (!body) return null;
   const text = String(body.text || body.corrected_text || body.raw_text || "").trim();
   if (!text) return null;
+  const segments = Array.isArray(body.segments)
+    ? body.segments.map((segment) => {
+      const startSeconds = Number(segment?.start_seconds ?? segment?.start ?? 0);
+      const endSeconds = Number(segment?.end_seconds ?? segment?.end ?? startSeconds);
+      return {
+        startSeconds: Number.isFinite(startSeconds) ? Math.max(0, startSeconds) : 0,
+        endSeconds: Number.isFinite(endSeconds) ? Math.max(0, endSeconds) : Math.max(0, startSeconds),
+        text: String(segment?.text || "").trim(),
+      };
+    }).filter((segment) => segment.text)
+    : [];
   return {
     text,
     rawText: String(body.raw_text || text),
@@ -74,6 +85,7 @@ function transcriptPayload(body) {
     provider: String(body.provider || body.asr_provider || ""),
     model: String(body.model || body.asr_model || ""),
     jobId: String(body.job_id || ""),
+    segments,
   };
 }
 
@@ -81,7 +93,9 @@ function sceneAnalysisPayload(body) {
   if (!body) return null;
   const scenes = Array.isArray(body.scenes)
     ? body.scenes.map((scene) => ({
-      timestampSeconds: Math.max(0, Number(scene?.timestamp_seconds || 0)),
+      timestampSeconds: Number.isFinite(Number(scene?.timestamp_seconds))
+        ? Math.max(0, Number(scene.timestamp_seconds))
+        : 0,
       description: String(scene?.description || "").trim(),
       labels: Array.isArray(scene?.labels)
         ? scene.labels.filter((label) => typeof label === "string").map((label) => label.trim()).filter(Boolean)
@@ -167,6 +181,9 @@ export async function loadEntries(root, { date = "", assetOrigin = "" } = {}) {
       const transcript = transcriptPayload(transcriptBody);
       const sceneAnalysis = sceneAnalysisPayload(sceneBody);
       const capturedAt = String(metadata?.captured_at || metadata?.creation_time || sourceInfo.mtime.toISOString());
+      const captureTimeSource = String(metadata?.capture_time_source || (
+        metadata?.captured_at || metadata?.creation_time ? "metadata_legacy" : "filesystem_mtime_fallback"
+      ));
       const status = String(metadata?.status || (transcript ? "completed" : "pending"));
 
       entries.push({
@@ -180,6 +197,7 @@ export async function loadEntries(root, { date = "", assetOrigin = "" } = {}) {
         sizeBytes: Number(metadata?.size_bytes || sourceInfo.size),
         modifiedAt: sourceInfo.mtime.toISOString(),
         capturedAt,
+        captureTimeSource,
         durationSeconds: Number(metadata?.duration_seconds || 0),
         width: Number(metadata?.width || 0) || null,
         height: Number(metadata?.height || 0) || null,
@@ -192,10 +210,7 @@ export async function loadEntries(root, { date = "", assetOrigin = "" } = {}) {
     }
   }
 
-  return entries.sort((left, right) => {
-    const time = String(left.capturedAt).localeCompare(String(right.capturedAt));
-    return time || left.filename.localeCompare(right.filename);
-  });
+  return sortEntriesChronologically(entries);
 }
 
 export async function loadDailyPlayback(root, entries, date, { assetOrigin = "" } = {}) {
@@ -330,35 +345,224 @@ function formatDuration(seconds) {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
-export function buildMemoryContext(entries, date, { origin = "" } = {}) {
+function formatTimelineOffset(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const remainder = value - minutes * 60;
+  if (Math.abs(remainder - Math.round(remainder)) < 0.001) {
+    return `${String(minutes).padStart(2, "0")}:${String(Math.round(remainder)).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${remainder.toFixed(3).padStart(6, "0")}`;
+}
+
+function timestampMilliseconds(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  // Metadata without an explicit offset is treated as UTC so ordering is not
+  // changed by the server/container's local timezone.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text}Z`;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function sortEntriesChronologically(entries) {
+  return [...entries].sort((left, right) => {
+    const leftTimestamp = timestampMilliseconds(left.capturedAt);
+    const rightTimestamp = timestampMilliseconds(right.capturedAt);
+    if (leftTimestamp !== null && rightTimestamp !== null && leftTimestamp !== rightTimestamp) {
+      return leftTimestamp - rightTimestamp;
+    }
+    if (leftTimestamp === null && rightTimestamp !== null) return 1;
+    if (leftTimestamp !== null && rightTimestamp === null) return -1;
+    return String(left.filename).localeCompare(String(right.filename));
+  });
+}
+
+function validTimeZone(value) {
+  const requested = String(value || "Asia/Tokyo").trim() || "Asia/Tokyo";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: requested }).format();
+    return requested;
+  } catch {
+    return "UTC";
+  }
+}
+
+function localDateTime(timestamp, timeZone) {
+  if (timestamp === null) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(timestamp));
+  const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
+}
+
+function isoTimestamp(timestamp) {
+  return timestamp === null ? "" : new Date(timestamp).toISOString();
+}
+
+function secondsValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, number) : 0;
+}
+
+function captureTimeSourceLabel(value) {
+  const labels = {
+    ffprobe_metadata: "ffprobe creation metadata",
+    filesystem_mtime_fallback: "filesystem mtime fallback (approximate)",
+    metadata: "metadata",
+    metadata_legacy: "legacy metadata (precision unknown)",
+  };
+  const source = String(value || "unknown");
+  return labels[source] || source;
+}
+
+function buildTimeline(entries, timeZone, origin) {
+  const ordered = sortEntriesChronologically(entries);
+  let previousEndTimestamp = null;
+  return ordered.map((entry, index) => {
+    const startTimestamp = timestampMilliseconds(entry.capturedAt);
+    const durationSeconds = secondsValue(entry.durationSeconds);
+    const endTimestamp = startTimestamp === null ? null : startTimestamp + durationSeconds * 1000;
+    const gapAfterPreviousEndSeconds = startTimestamp !== null && previousEndTimestamp !== null
+      ? Number(((startTimestamp - previousEndTimestamp) / 1000).toFixed(3))
+      : null;
+    previousEndTimestamp = endTimestamp;
+
+    const scenes = [...(entry.sceneAnalysis?.scenes || [])]
+      .sort((left, right) => secondsValue(left.timestampSeconds) - secondsValue(right.timestampSeconds))
+      .map((scene) => {
+        const offsetSeconds = secondsValue(scene.timestampSeconds);
+        const absoluteTimestamp = startTimestamp === null ? null : startTimestamp + offsetSeconds * 1000;
+        return {
+          offsetSeconds,
+          offset: formatTimelineOffset(offsetSeconds),
+          absoluteAtUtc: isoTimestamp(absoluteTimestamp),
+          absoluteAtLocal: localDateTime(absoluteTimestamp, timeZone),
+          description: scene.description,
+          labels: scene.labels || [],
+        };
+      });
+    const transcriptSegments = [...(entry.transcript?.segments || [])]
+      .sort((left, right) => secondsValue(left.startSeconds) - secondsValue(right.startSeconds))
+      .map((segment) => ({
+        startSeconds: secondsValue(segment.startSeconds),
+        endSeconds: Math.max(secondsValue(segment.startSeconds), secondsValue(segment.endSeconds)),
+        start: formatTimelineOffset(segment.startSeconds),
+        end: formatTimelineOffset(segment.endSeconds),
+        text: segment.text,
+      }));
+    return {
+      sequence: index + 1,
+      id: entry.id,
+      filename: entry.filename,
+      capturedAt: entry.capturedAt,
+      startAtUtc: isoTimestamp(startTimestamp),
+      startAtLocal: localDateTime(startTimestamp, timeZone),
+      endAtUtc: isoTimestamp(endTimestamp),
+      endAtLocal: localDateTime(endTimestamp, timeZone),
+      durationSeconds,
+      captureTimeSource: entry.captureTimeSource,
+      gapAfterPreviousEndSeconds,
+      sourceUrl: origin ? new URL(entry.videoUrl, origin).href : entry.videoUrl,
+      status: entry.status,
+      visualSummary: entry.sceneAnalysis?.summary || "",
+      scenes,
+      transcript: entry.transcript?.text || "",
+      transcriptSegments,
+    };
+  });
+}
+
+function formatElapsed(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const remainder = value % 60;
+  return `${hours ? `${String(hours).padStart(2, "0")}:` : ""}${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function gapLine(seconds) {
+  if (seconds === null) return "- Gap after previous clip: unavailable (capture time metadata is missing)";
+  if (seconds >= 0) return `- Gap after previous clip: ${formatElapsed(seconds)}`;
+  return `- Overlap with previous clip: ${formatElapsed(Math.abs(seconds))}`;
+}
+
+export function buildMemoryContext(entries, date, { origin = "", timeZone = process.env.AFTERIMAGE_TIMEZONE || "Asia/Tokyo" } = {}) {
   const requestedDate = normalizeDate(date);
   if (!requestedDate) throw new Error("invalid_date");
-  const selected = entries.filter((entry) => entry.date === requestedDate);
+  const selected = sortEntriesChronologically(entries.filter((entry) => entry.date === requestedDate));
   const transcribed = selected.filter((entry) => entry.transcript?.text);
+  const analyzed = selected.filter((entry) => entry.sceneAnalysis?.summary || entry.sceneAnalysis?.scenes?.length);
+  const resolvedTimeZone = validTimeZone(timeZone);
+  const timeline = buildTimeline(selected, resolvedTimeZone, origin);
   const lines = [
     `# ${requestedDate} Lifelog`,
     "",
     `- Clips: ${selected.length}`,
     `- Transcribed: ${transcribed.length}`,
+    `- Visually analyzed: ${analyzed.length}`,
+    `- Local display timezone: ${resolvedTimeZone}`,
+    "",
+    "## Chronological timeline",
+    "",
+    "Read this section as an evidence timeline. Clips are ordered by capture start (the actual instant), not by filename or ingest time.",
+    "- The date in this heading is the source directory date. Use the explicit timestamps below as the authority if a clip crosses a local midnight.",
+    "- Capture end is estimated as capture start plus clip duration; it is not a separately observed event.",
+    "- A gap means no video was captured. Do not invent activities inside a gap.",
+    "- Visual observations are sampled frames. Their `+MM:SS` offsets are relative to the clip start and are listed in video order.",
+    "- Keep observed facts separate from inferences; a clip does not prove what happened between its sampled frames.",
     "",
   ];
-  for (const entry of selected) {
-    const sourceUrl = origin ? new URL(entry.videoUrl, origin).href : entry.videoUrl;
-    lines.push(`## ${entry.capturedAt || entry.filename} — ${entry.filename}`);
+  for (const item of timeline) {
+    const startLabel = item.startAtLocal || item.capturedAt || "unknown start";
+    const endLabel = item.endAtLocal || "unknown end";
+    lines.push(`### ${String(item.sequence).padStart(2, "0")} · ${startLabel} → ${endLabel} — ${item.filename}`);
     lines.push("");
-    lines.push(`- Duration: ${formatDuration(entry.durationSeconds)}`);
-    lines.push(`- Source: ${sourceUrl}`);
-    lines.push(`- Status: ${entry.status}`);
-    if (entry.sceneAnalysis?.summary) lines.push(`- Visual context: ${entry.sceneAnalysis.summary}`);
+    lines.push(`- Capture start: ${item.startAtLocal || "unavailable"}${item.startAtUtc ? ` (UTC ${item.startAtUtc})` : ""}`);
+    lines.push(`- Capture end (estimated): ${item.endAtLocal || "unavailable"}${item.endAtUtc ? ` (UTC ${item.endAtUtc})` : ""}`);
+    lines.push(`- Capture time source: ${captureTimeSourceLabel(item.captureTimeSource)}`);
+    lines.push(`- Duration: ${formatDuration(item.durationSeconds)}`);
+    lines.push(item.sequence === 1 ? "- Gap after previous clip: n/a (first clip in timeline)" : gapLine(item.gapAfterPreviousEndSeconds));
+    lines.push(`- Source: ${item.sourceUrl}`);
+    lines.push(`- Status: ${item.status}`);
+    if (item.visualSummary) lines.push(`- Visual context: ${item.visualSummary}`);
+    if (item.scenes.length) {
+      lines.push("- Visual observations (ordered by clip offset):");
+      for (const scene of item.scenes) {
+        const absolute = scene.absoluteAtLocal
+          ? ` (absolute local ${scene.absoluteAtLocal}${scene.absoluteAtUtc ? `; UTC ${scene.absoluteAtUtc}` : ""})`
+          : "";
+        const labels = scene.labels.length ? ` [labels: ${scene.labels.join(", ")}]` : "";
+        lines.push(`  - +${scene.offset}${absolute} — ${scene.description}${labels}`);
+      }
+    }
+    if (item.transcriptSegments.length) {
+      lines.push("- Transcript segments (ordered by clip offset):");
+      for (const segment of item.transcriptSegments) {
+        lines.push(`  - +${segment.start}–+${segment.end} — ${segment.text}`);
+      }
+    } else {
+      lines.push("- Transcript:", `  ${item.transcript || "_Transcription pending_"}`);
+    }
     lines.push("");
-    lines.push(entry.transcript?.text || "_Transcription pending_", "");
   }
   return {
     date: requestedDate,
+    timezone: resolvedTimeZone,
     clipCount: selected.length,
     transcribedCount: transcribed.length,
+    analyzedCount: analyzed.length,
+    timeline,
     markdown: `${lines.join("\n").trim()}\n`,
-    sources: selected.map((entry) => ({ id: entry.id, filename: entry.filename, videoUrl: origin ? new URL(entry.videoUrl, origin).href : entry.videoUrl })),
+    sources: timeline.map((item) => ({ id: item.id, filename: item.filename, videoUrl: item.sourceUrl })),
   };
 }
 

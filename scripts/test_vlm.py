@@ -33,6 +33,12 @@ class VlmContractTest(unittest.TestCase):
             {"description": "A child playing outside.", "labels": ["child", "outside"]},
         )
 
+    def test_frame_prompt_includes_clip_offset(self) -> None:
+        prompt = vlm.frame_prompt(12.5)
+
+        self.assertIn("00:12.500", prompt)
+        self.assertIn("clip start", prompt.lower())
+
     def test_analyze_video_uses_pluggable_provider(self) -> None:
         def fake_extract(_video: Path, destination: Path, timestamp: float) -> None:
             destination.write_bytes(f"frame:{timestamp}".encode())

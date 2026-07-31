@@ -19,6 +19,20 @@ DEFAULT_PROMPT = (
 )
 
 
+def frame_prompt(timestamp_seconds: float) -> str:
+    """Add deterministic clip-relative timing without asking the model to invent chronology."""
+    value = max(0.0, float(timestamp_seconds))
+    minutes = int(value // 60)
+    remainder = value - minutes * 60
+    offset = f"{minutes:02d}:{remainder:06.3f}"
+    return (
+        f"{DEFAULT_PROMPT} "
+        f"This frame was sampled at +{offset} from the clip start. "
+        "Use this only as a clip-relative time anchor; do not infer wall-clock time, "
+        "events between sampled frames, or actions that are not visible in this frame."
+    )
+
+
 class VisionProvider(Protocol):
     name: str
     model: str
@@ -221,7 +235,7 @@ class OpenAICompatibleProvider:
                 "messages": [{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": DEFAULT_PROMPT},
+                        {"type": "text", "text": frame_prompt(timestamp_seconds)},
                         {"type": "image_url", "image_url": {"url": data_url}},
                     ],
                 }],
@@ -251,7 +265,7 @@ class OllamaProvider:
             f"{self.base_url}/api/chat",
             {
                 "model": self.model,
-                "messages": [{"role": "user", "content": DEFAULT_PROMPT, "images": [_image_base64(image)]}],
+                "messages": [{"role": "user", "content": frame_prompt(timestamp_seconds), "images": [_image_base64(image)]}],
                 "format": "json",
                 "stream": False,
                 "options": {"temperature": 0},
@@ -284,7 +298,7 @@ class GeminiProvider:
                 "contents": [{
                     "role": "user",
                     "parts": [
-                        {"text": DEFAULT_PROMPT},
+                        {"text": frame_prompt(timestamp_seconds)},
                         {"inlineData": {"mimeType": "image/jpeg", "data": _image_base64(image)}},
                     ],
                 }],

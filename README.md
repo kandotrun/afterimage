@@ -143,7 +143,9 @@ MCP clients should send `Authorization: Bearer <token>`. If both token and Basic
 | `list_daily_entries` | List videos by date with transcript and visual-analysis status |
 | `get_daily_entry` | Get complete metadata, scenes, transcript, and source URLs |
 | `search_daily_transcripts` | Search filename, speech, scene descriptions, and labels |
-| `get_daily_memory_context` | Get a day's source-backed Markdown context for an AI agent |
+| `get_daily_memory_context` | Get a day's chronological, source-backed Markdown context for an AI agent |
+
+The memory context is intentionally evidence-oriented: capture instants are sorted by timestamp (not filename), clip ends are marked as estimates, gaps/overlaps are explicit, and VLM/STT observations retain clip-relative offsets plus absolute local/UTC timestamps. When ffprobe metadata is unavailable, the context labels filesystem mtime as approximate instead of presenting it as an exact capture time.
 
 Example MCP configuration:
 
@@ -170,6 +172,7 @@ See [`.env.example`](.env.example) for every setting.
 | `AFTERIMAGE_MODE` | `lifelog` | `lifelog` or `public` |
 | `AFTERIMAGE_ORIGIN` | local URL | Public server/MCP origin |
 | `AFTERIMAGE_ASSET_ORIGIN` | server origin | Optional separate media origin |
+| `AFTERIMAGE_TIMEZONE` | `Asia/Tokyo` | Local timezone used for daily context; UTC timestamps are also included |
 | `BIND_ADDRESS` | `127.0.0.1` | Compose host interface; use `0.0.0.0` only with auth |
 | `INSTALL_LOCAL_WHISPER` | `1` | Include local Whisper in the Docker image |
 | `AFTERIMAGE_AUTH_TOKEN` | empty | Bearer token |

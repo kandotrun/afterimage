@@ -387,6 +387,7 @@ export function createAfterimageServer({
   mode = "lifelog",
   lifelogOrigin = "",
   assetOrigin = "",
+  timeZone = process.env.AFTERIMAGE_TIMEZONE || "Asia/Tokyo",
   auth = {},
 }) {
   if (!root) throw new Error("root is required");
@@ -461,7 +462,12 @@ export function createAfterimageServer({
           response.setHeader("allow", "POST, OPTIONS");
           return sendJson(response, 405, { jsonrpc: "2.0", error: { code: -32000, message: "SSE stream is not supported." }, id: null });
         }
-        return await handleMcpRequest(request, response, { root, lifelogOrigin: resolvedLifelogOrigin, assetOrigin: resolvedAssetOrigin });
+        return await handleMcpRequest(request, response, {
+          root,
+          lifelogOrigin: resolvedLifelogOrigin,
+          assetOrigin: resolvedAssetOrigin,
+          timeZone,
+        });
       }
 
       if (lifelogMode && pathname.startsWith("/api/")) {
@@ -496,7 +502,7 @@ export function createAfterimageServer({
           const date = url.searchParams.get("date") || "";
           if (!date) return sendJson(response, 400, { error: "date_required" }, method);
           const entries = await loadEntries(root, { date, assetOrigin: resolvedAssetOrigin });
-          return sendJson(response, 200, buildMemoryContext(entries, date, { origin: resolvedAssetOrigin }), method);
+          return sendJson(response, 200, buildMemoryContext(entries, date, { origin: resolvedAssetOrigin, timeZone }), method);
         }
         return sendJson(response, 404, { error: "not_found" }, method);
       }
