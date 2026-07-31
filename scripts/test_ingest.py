@@ -272,6 +272,22 @@ class IngestWithoutSttTest(unittest.TestCase):
         self.assertIn("A dog is resting at home.", markdown)
         self.assertIn("+00:01–+00:02.500", markdown)
 
+    def test_daily_video_order_uses_capture_instants(self) -> None:
+        later_name = self.root / "daily" / "2026" / "0729" / "later-name.mp4"
+        earlier_name = self.root / "daily" / "2026" / "0729" / "earlier-name.mp4"
+        for video in (later_name, earlier_name):
+            video.parent.mkdir(parents=True, exist_ok=True)
+            video.write_bytes(b"fake-video")
+        metadata = {
+            ingest.artifact_paths(self.root, later_name)["metadata"]: {"captured_at": "2026-07-29T01:00:00+09:00"},
+            ingest.artifact_paths(self.root, earlier_name)["metadata"]: {"captured_at": "2026-07-29T00:30:00Z"},
+        }
+
+        with mock.patch.object(ingest, "read_json", side_effect=lambda path: metadata.get(path, {})):
+            ordered = ingest.sort_videos_by_capture(self.root, [earlier_name, later_name])
+
+        self.assertEqual(ordered, [later_name, earlier_name])
+
     def test_transcript_record_preserves_timed_segments(self) -> None:
         record = ingest.transcript_record(
             self.root,
